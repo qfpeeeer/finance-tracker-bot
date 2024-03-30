@@ -30,6 +30,7 @@ go.work
 # Reference: https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
 
 .idea
+data.db
 
 # User-specific stuff
 .idea/**/workspace.xml
