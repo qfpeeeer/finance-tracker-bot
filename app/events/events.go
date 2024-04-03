@@ -32,6 +32,11 @@ type CategoriesRepository interface {
 	ListCategories(userID int64) ([]storage.CategoryInfo, error)
 }
 
+type SpendingsRepository interface {
+	AddSpending(info storage.SpendingInfo) error
+	ListSpendings(userID int64) ([]storage.SpendingInfo, error)
+}
+
 type CommandHandler interface {
 	HandleCommands(ctx context.Context, update tbapi.Update)
 }

@@ -8,6 +8,9 @@ import (
 	"github.com/looplab/fsm"
 	"github.com/nyanyamaga/finance-tracker-bot/app/storage"
 	"log"
+	"strconv"
+	"strings"
+	"time"
 )
 
 type BotStateManager struct {
@@ -15,16 +18,18 @@ type BotStateManager struct {
 	TbKeyboards TbKeyboards
 	UserState   UserStateRepository
 	Categories  CategoriesRepository
+	Spendings   SpendingsRepository
 	UserFSMs    map[int64]*fsm.FSM
 	UserValues  map[int64]string
 }
 
-func NewBotStateManager(tbAPI TbAPI, tbKeyboards TbKeyboards, usRepository UserStateRepository, cRepository CategoriesRepository) *BotStateManager {
+func NewBotStateManager(tbAPI TbAPI, tbKeyboards TbKeyboards, usRepository UserStateRepository, cRepository CategoriesRepository, sRepository SpendingsRepository) *BotStateManager {
 	return &BotStateManager{
 		TbAPI:       tbAPI,
 		TbKeyboards: tbKeyboards,
 		UserState:   usRepository,
 		Categories:  cRepository,
+		Spendings:   sRepository,
 		UserFSMs:    make(map[int64]*fsm.FSM),
 		UserValues:  make(map[int64]string),
 	}
@@ -36,17 +41,21 @@ func (sm *BotStateManager) InitializeUserFSM(ctx context.Context, userID int64) 
 		fsm.Events{
 			{Name: "ChooseAddSpending", Src: []string{"Idle"}, Dst: "AwaitingCategorySelection"},
 			{Name: "ChooseAddCategory", Src: []string{"Idle"}, Dst: "AwaitingNewCategoryName"},
-			{Name: "CategorySelected", Src: []string{"AwaitingCategorySelection"}, Dst: "AwaitingAmountInput"},
-			{Name: "AmountEntered", Src: []string{"AwaitingAmountInput"}, Dst: "Idle"},
+
 			{Name: "NewCategoryNameEntered", Src: []string{"AwaitingNewCategoryName"}, Dst: "AwaitingNewCategoryEmoji"},
 			{Name: "NewCategoryEmojiEntered", Src: []string{"AwaitingNewCategoryEmoji"}, Dst: "AwaitingSaveCategoryName"},
 			{Name: "SaveNewCategory", Src: []string{"AwaitingSaveCategoryName"}, Dst: "Idle"},
+
+			{Name: "CategorySelected", Src: []string{"AwaitingCategorySelection"}, Dst: "AwaitingAmountInput"},
+			{Name: "AmountEntered", Src: []string{"AwaitingAmountInput"}, Dst: "SaveSpending"},
+			{Name: "SpendingSaved", Src: []string{"SaveSpending"}, Dst: "Idle"},
 		},
 		fsm.Callbacks{
 			"leave_state":                     func(ctx context.Context, e *fsm.Event) { sm.leaveState(e, userID) },
 			"enter_Idle":                      func(ctx context.Context, e *fsm.Event) { sm.promptEnterIdle(userID) },
 			"enter_AwaitingCategorySelection": func(ctx context.Context, e *fsm.Event) { sm.promptCategorySelection(userID) },
 			"enter_AwaitingAmountInput":       func(ctx context.Context, e *fsm.Event) { sm.promptAmountInput(userID) },
+			"enter_SaveSpending":              func(ctx context.Context, e *fsm.Event) { sm.saveSpending(ctx, userID) },
 			"enter_AwaitingNewCategoryName":   func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryName(userID) },
 			"enter_AwaitingNewCategoryEmoji":  func(ctx context.Context, e *fsm.Event) { sm.promptNewCategoryEmoji(userID) },
 			"enter_AwaitingSaveCategoryName":  func(ctx context.Context, e *fsm.Event) { sm.promptSaveNewCategory(ctx, userID) },
@@ -152,16 +161,6 @@ func (sm *BotStateManager) promptCategorySelection(userID int64) {
 	}
 }
 
-func (sm *BotStateManager) promptAmountInput(userID int64) {
-	text := "Please enter the amount:"
-
-	err := sm.sendBotResponse(userID, text, nil)
-	if err != nil {
-		log.Printf("[warn] error sending amount prompt: %v", err)
-		return
-	}
-}
-
 func (sm *BotStateManager) promptNewCategoryName(userID int64) {
 	text := "Please enter the name of the new category:"
 
@@ -243,6 +242,66 @@ func (sm *BotStateManager) getStateData(userID int64) (map[string]interface{}, e
 
 	return data, nil
 }
+
+func (sm *BotStateManager) promptAmountInput(userID int64) {
+	text := "Please enter the amount:"
+
+	err := sm.sendBotResponse(userID, text, nil)
+	if err != nil {
+		log.Printf("[warn] error sending amount prompt: %v", err)
+		return
+	}
+}
+
+func (sm *BotStateManager) saveSpending(ctx context.Context, userID int64) {
+	stateData, err := sm.getStateData(userID)
+	if err != nil {
+		log.Printf("[warn] error fetching state data: %v", err)
+		return
+	}
+
+	categoryData := stateData["CategorySelected"].(string)
+	categoryIDString := strings.Split(categoryData, "_")[1]
+	categoryID, err := strconv.Atoi(categoryIDString)
+
+	if err != nil {
+		log.Printf("[warn] error converting category ID to int: %v", err)
+		return
+	}
+
+	amount := stateData["AmountEntered"].(string)
+	amountFloat, err := strconv.ParseFloat(amount, 64)
+	if err != nil {
+		log.Printf("[warn] error converting amount to float: %v", err)
+		return
+	}
+
+	// TODO: Validate amount and if it's not a number, return an error message and stay in the same state
+	spending := storage.SpendingInfo{
+		UserID:      userID,
+		CategoryID:  int64(categoryID),
+		Amount:      amountFloat,
+		Description: "",
+		Timestamp:   time.Now(),
+	}
+
+	if err := sm.Spendings.AddSpending(spending); err != nil {
+		log.Printf("[warn] error saving spending for user %d: %v", userID, err)
+		return
+	}
+
+	text := "Spending saved!"
+	err = sm.sendBotResponse(userID, text, nil)
+	if err != nil {
+		log.Printf("[warn] error sending spending save prompt: %v", err)
+		return
+	}
+
+	if err := sm.UserFSMs[userID].Event(ctx, "SpendingSaved"); err != nil {
+		log.Printf("[warn] error transitioning to Idle after saving spending for user %d: %v", userID, err)
+	}
+}
+
 func unmarshalUserData(jsonData string) (map[string]interface{}, error) {
 	data := make(map[string]interface{})
 	if jsonData != "" {
